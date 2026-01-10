@@ -8,7 +8,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev:frontend": "cd apps/frontend && pnpm run dev",
+    "dev:backend": "cd apps/backend && pnpm run start:dev",
+    "dev": "pnpm run dev:frontend & pnpm run dev:backend"
   },
   "repository": {
     "type": "git",
