@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: kody-store-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-kody}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kodypassword}
+      POSTGRES_DB: ${DB_NAME:-kody_db}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kody -d kody_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: kody-store-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer:latest
+    container_name: kody-store-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  pg_data:

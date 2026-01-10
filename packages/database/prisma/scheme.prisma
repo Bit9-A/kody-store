@@ -1,0 +1,326 @@
+// --------------------------------------------------------
+// CONFIGURACIÓN DEL GENERADOR Y DATASOURCE
+// --------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --------------------------------------------------------
+// ENUMS (Tipos de datos fijos)
+// --------------------------------------------------------
+
+enum Role {
+  ADMIN
+  CUSTOMER
+  SUPPORT
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT      // Creada, esperando pago
+  PAID                 // Pagada, procesando
+  PROCESSING_LOCAL     // Preparando en almacén local
+  PURCHASING_EXTERNAL  // Comprando en Amazon/eBay (para imports)
+  ARRIVED_WAREHOUSE    // Llegó a Miami/Casillero
+  SHIPPING_INTL        // En tránsito internacional
+  READY_FOR_PICKUP     // Listo para retirar/entregar
+  COMPLETED            // Entregado
+  CANCELLED
+  REFUNDED
+}
+
+enum ItemType {
+  LOCAL   // Producto de nuestro inventario
+  IMPORT  // Producto de Amazon/eBay/Etc
+}
+
+enum PaymentProvider {
+  STRIPE
+  PAYPAL
+  ZELLE
+  MANUAL_TRANSFER
+}
+
+// --------------------------------------------------------
+// 1. MÓDULO DE USUARIOS Y AUTH
+// --------------------------------------------------------
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  fullName      String?
+  phone         String?
+  
+  role          Role      @default(CUSTOMER)
+  isActive      Boolean   @default(true)
+  
+  // Relaciones
+  orders        Order[]
+  addresses     Address[]
+  reviews       Review[]
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("users") // Nombre de la tabla en SQL
+}
+
+model Address {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name        String   // "Casa", "Oficina"
+  street      String
+  city        String
+  state       String
+  zipCode     String?
+  country     String   @default("VE")
+  
+  isDefault   Boolean  @default(false)
+
+  @@map("addresses")
+}
+
+// --------------------------------------------------------
+// 2. MÓDULO CMS & CONFIGURACIÓN (El Corazón Open Source)
+// --------------------------------------------------------
+
+// Esta tabla permite que quien instale tu app cambie el logo,
+// colores y precios sin tocar código.
+model SiteConfig {
+  id                 Int      @id @default(1) // Singleton (siempre ID 1)
+  
+  // Identidad Visual
+  siteName           String   @default("CodeRAM Store")
+  logoUrl            String?
+  faviconUrl         String?
+  primaryColor       String   @default("#0f172a") // Tailwind Slate-900
+  secondaryColor     String   @default("#3b82f6") // Tailwind Blue-500
+  
+  // Variables de Negocio (Motor de Precios)
+  currencySymbol     String   @default("$")
+  exchangeRate       Decimal  @default(1.0)  // Tasa de cambio Local/USD
+  pricePerLb         Decimal  @default(5.00) // Costo por libra envío intl.
+  serviceFeePercent  Decimal  @default(10.0) // Tu ganancia (%)
+  minServiceFee      Decimal  @default(5.00) // Ganancia mínima ($)
+  taxRateUSA         Decimal  @default(7.0)  // Tax promedio en Miami (%)
+  
+  // Datos de Contacto
+  contactPhone       String?
+  contactEmail       String?
+  socialLinks        Json?    // { instagram: "...", tiktok: "..." }
+  
+  updatedAt          DateTime @updatedAt
+
+  @@map("site_config")
+}
+
+// Páginas estáticas editables (Quiénes somos, Términos)
+model PageContent {
+  id        String   @id @default(uuid())
+  slug      String   @unique // 'quienes-somos', 'politicas'
+  title     String
+  content   String   @db.Text // HTML del Rich Text Editor
+  seoMeta   Json?    // { title: "...", desc: "..." }
+  isPublic  Boolean  @default(true)
+  
+  updatedAt DateTime @updatedAt
+
+  @@map("pages")
+}
+
+// --------------------------------------------------------
+// 3. MÓDULO DE CATÁLOGO (Inventario Local)
+// --------------------------------------------------------
+
+model Category {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique
+  imageUrl    String?
+  products    Product[] // Relación con productos locales
+
+  @@map("categories")
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  sku         String   @unique
+  name        String
+  slug        String   @unique
+  description String   @db.Text
+  
+  // Precios y Stock
+  price       Decimal  // Precio base de venta local
+  comparePrice Decimal? // Precio "tachado" (oferta)
+  costPrice   Decimal? // Costo interno (para reportes de ganancia)
+  stock       Int      @default(0)
+  
+  // Detalles físicos
+  weightLb    Decimal? // Para calcular envío si aplica
+  dimensions  Json?    // { w: 10, h: 10, l: 10 }
+  
+  images      String[] // Array de URLs
+  isActive    Boolean  @default(true)
+  isFeatured  Boolean  @default(false)
+
+  // Relaciones
+  categoryId  String?
+  category    Category? @relation(fields: [categoryId], references: [id])
+  reviews     Review[]
+  orderItems  OrderItem[] // Relación inversa para saber quién compró qué
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("products")
+}
+
+// --------------------------------------------------------
+// 4. MÓDULO DE SCRAPING & PROXY (El Motor Importador)
+// --------------------------------------------------------
+
+// Caché para no banearnos de Amazon/eBay.
+// Si alguien busca un link, guardamos el resultado aquí por 24h.
+model ExternalProductCache {
+  urlHash     String   @id // SHA256 de la URL (índice rápido)
+  originalUrl String   @db.Text
+  provider    String   // 'amazon', 'ebay', 'walmart'
+  
+  // Datos extraídos
+  title       String
+  priceUSD    Decimal
+  currency    String   @default("USD")
+  imageUrl    String?
+  weightLb    Decimal? // Estimado o extraído
+  availability String? // 'In Stock', 'Out of Stock'
+  
+  rawMetadata Json?    // JSON completo crudo del scraping por si acaso
+  
+  lastScraped DateTime @default(now())
+  expiresAt   DateTime // Cuándo debemos volver a scrapear
+
+  @@map("external_product_cache")
+}
+
+// Reglas CSS para el Scraper (Editable desde Admin para no recompilar código)
+// Si Amazon cambia su HTML, el admin actualiza el selector CSS aquí.
+model ScraperSelector {
+  id          String   @id @default(uuid())
+  domain      String   @unique // 'amazon.com'
+  
+  // Selectores CSS
+  titleSel    String   // '#productTitle'
+  priceSel    String   // '.a-price .a-offscreen'
+  imageSel    String   // '#landingImage'
+  weightSel   String?  // '#shipping-weight'
+  
+  isActive    Boolean  @default(true)
+
+  @@map("scraper_selectors")
+}
+
+// --------------------------------------------------------
+// 5. MÓDULO DE PEDIDOS (Híbrido)
+// --------------------------------------------------------
+
+model Order {
+  id              String      @id @default(uuid())
+  orderNumber     Int         @unique @default(autoincrement()) // ID legible: #1001
+  
+  userId          String
+  user            User        @relation(fields: [userId], references: [id])
+  
+  status          OrderStatus @default(PENDING_PAYMENT)
+  
+  // Totales
+  subtotal        Decimal
+  shippingCost    Decimal     // Suma de envíos locales + internacionales
+  taxTotal        Decimal
+  serviceFeeTotal Decimal     // Ganancia total por servicios de importación
+  total           Decimal
+  
+  currency        String      @default("USD")
+  exchangeRate    Decimal     // Snapshot de la tasa al momento de compra
+  
+  // Datos de envío y pago
+  shippingAddress Json        // Copia de la dirección (snapshot)
+  paymentProvider PaymentProvider?
+  paymentId       String?     // ID de Stripe/PayPal
+  paymentMetadata Json?       // Respuesta completa del gateway
+  
+  items           OrderItem[]
+  
+  notes           String?
+  trackingNumber  String?     // Para el cliente final
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id              String   @id @default(uuid())
+  orderId         String
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  type            ItemType // LOCAL o IMPORT
+  quantity        Int
+  
+  // Precios Unitarios (Snapshot al momento de compra)
+  unitPrice       Decimal  // Precio base del producto
+  unitWeight      Decimal? // Peso cobrado
+  totalPrice      Decimal  // (unitPrice * qty) + fees
+  
+  // --- SI ES LOCAL ---
+  productId       String?
+  product         Product? @relation(fields: [productId], references: [id])
+  
+  // --- SI ES IMPORTADO (Proxy) ---
+  // No relacionamos a una tabla de productos, porque el producto externo puede cambiar/borrarse.
+  // Guardamos TODOS los datos necesarios aquí (Snapshot).
+  externalUrl     String?
+  externalTitle   String?
+  externalImage   String?
+  externalProvider String? // Amazon, eBay
+  
+  // Desglose de costos de importación específicos de este ítem
+  importFees      Json?    
+  // Ejemplo de JSON importFees:
+  // {
+  //   "usaTax": 5.00,
+  //   "shippingIntl": 15.00,
+  //   "serviceFee": 10.00,
+  //   "weightCharged": 2.5
+  // }
+
+  @@map("order_items")
+}
+
+// --------------------------------------------------------
+// 6. EXTRAS
+// --------------------------------------------------------
+
+model Review {
+  id        String   @id @default(uuid())
+  rating    Int      // 1-5
+  comment   String?
+  
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@map("reviews")
+}
